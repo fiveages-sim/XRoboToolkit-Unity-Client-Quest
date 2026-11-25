@@ -1,6 +1,4 @@
-﻿using System;
-using UnityEngine;
-using UnityEngine.UI;
+﻿using UnityEngine;
 
 namespace Robot.Conf
 {
@@ -73,22 +71,6 @@ namespace Robot.Conf
                 $"Camera Settings - Width: {cameraParams.width}, Height: {cameraParams.height}, FPS: {cameraParams.fps}, Bitrate: {cameraParams.BitrateInMbps:F1}Mbps");
             LogWindow.Info(
                 $"Camera Settings - Width: {cameraParams.width}, Height: {cameraParams.height}, FPS: {cameraParams.fps}, Bitrate: {cameraParams.BitrateInMbps:F1}Mbps");
-        }
-
-        private void OnGUI()
-        {
-            GUILayout.BeginVertical();
-            if (GUILayout.Button("PICO4U"))
-            {
-                UpdateVideoSource(videoSourceConfigManager.PICO4U);
-            }
-
-            if (GUILayout.Button("ZEDMINI"))
-            {
-                UpdateVideoSource(videoSourceConfigManager.ZEDMINI);
-            }
-
-            GUILayout.EndVertical();
         }
     }
 }

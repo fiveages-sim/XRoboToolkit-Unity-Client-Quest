@@ -1,14 +1,6 @@
-﻿using System;
-using LitJson;
+﻿using LitJson;
 using UnityEngine;
-using UnityEngine.XR;
-// using UnityEngine.XR.Hands;
-using UnityEngine.XR.Management;
-using Unity.Collections;
-using Oculus.Interaction;
 using Oculus.Interaction.Input;
-using CommonUsages = UnityEngine.XR.CommonUsages;
-using InputDevice = UnityEngine.XR.InputDevice;
 
 namespace Robot
 {
@@ -24,11 +16,15 @@ namespace Robot
         private JsonData _controllerDataJson = new JsonData();
         private JsonData _leftControllerJson = new JsonData();
         private JsonData _rightControllerJson = new JsonData();
+        private JsonData _headJson = new JsonData();
 
         private JsonData _stateData = new JsonData();
         private JsonData _handData = new JsonData();
         private JsonData _leftHandData = new JsonData();
         private JsonData _rightHandData = new JsonData();
+
+        // Reused buffers to avoid per-frame GC (Pico path reuses JsonData the same way).
+        private readonly Pose[] _jointPoseBuffer = new Pose[26];
 
         private QuestTrackingDataSource _questTrackingDataSource;
 
@@ -107,8 +103,7 @@ namespace Robot
 
                 if (HeadOn)
                 {
-                    JsonData sensorJson = GetHeadTrackingData();
-                    totalData["Head"] = sensorJson;
+                    totalData["Head"] = GetHeadTrackingData();
                 }
                 else
                 {
@@ -186,23 +181,21 @@ namespace Robot
         /// <returns>JsonData containing head pose and tracking status</returns>
         private JsonData GetHeadTrackingData()
         {
-            JsonData jsonData = new JsonData();
-
             var (valid, pose) = questTrackingDataSource.GetHeadsetPose();
             if (valid)
             {
                 var position = pose.position;
                 var rotation = pose.rotation;
                 ConvertHandedness(ref position, ref rotation);
-                jsonData["pose"] = GetPoseStr(position, rotation);
-                jsonData["status"] = 3; // Match PICO
+                _headJson["pose"] = GetPoseStr(position, rotation);
+                _headJson["status"] = 3; // Match PICO
             }
             else
             {
-                jsonData["status"] = 0;
+                _headJson["status"] = 0;
             }
 
-            return jsonData;
+            return _headJson;
         }
 
         /// <summary>
@@ -215,79 +208,65 @@ namespace Robot
         }
 
         /// <summary>
-        /// Gets controller tracking data for the specified hand
+        /// Fills pose (visual, low-latency) + buttons/axes (OVRInput raw, explicit L/R).
         /// </summary>
-        /// <param name="predictTime">Prediction time for the controller data</param>
-        /// <param name="handedness">Which hand controller to get data for (Left or Right)</param>
-        /// <returns>JsonData containing controller pose and button states</returns>
-        private JsonData GetControllerJsonData(double predictTime, Handedness handedness)
+        private void FillControllerJson(Handedness handedness, ref JsonData json)
         {
-            InputDevice controller;
-            var pose = Pose.identity;
-            if (handedness == Handedness.Left)
-            {
-                controller = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
-                pose = questTrackingDataSource.GetControllerPose(Handedness.Left);
-            }
-            else
-            {
-                controller = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
-                pose = questTrackingDataSource.GetControllerPose(Handedness.Right);
-            }
+            GetControllerJsonData(handedness, ref json);
 
-            // Debug.Log("Handedness: " + handedness + ", Controller: " + controller.name + ", Pose: " + pose);
-
-            var json = new JsonData();
-            GetControllerJsonData(controller, ref json);
-
+            Pose pose = questTrackingDataSource.GetControllerPose(handedness);
             var position = pose.position;
             var rotation = pose.rotation;
             ConvertHandedness(ref position, ref rotation);
             json["pose"] = GetPoseStr(position, rotation);
-            return json;
         }
 
         /// <summary>
         /// Gets tracking data for both left and right controllers
         /// </summary>
-        /// <param name="predictTime">Prediction time for the controller data</param>
-        /// <returns>JsonData containing both left and right controller data</returns>
         private JsonData GetLeftRightControllerJsonData(double predictTime)
         {
-            _leftControllerJson = GetControllerJsonData(predictTime, Handedness.Left);
+            FillControllerJson(Handedness.Left, ref _leftControllerJson);
             _controllerDataJson["left"] = _leftControllerJson;
 
-            _rightControllerJson = GetControllerJsonData(predictTime, Handedness.Right);
+            FillControllerJson(Handedness.Right, ref _rightControllerJson);
             _controllerDataJson["right"] = _rightControllerJson;
 
             return _controllerDataJson;
         }
 
         /// <summary>
-        /// Extracts button and axis data from a controller device and populates JsonData
+        /// Meta Quest thumbstick/buttons via OVRInput raw LTouch/RThumbstick masks.
+        /// Avoids Interaction ControllerInput (extra frame latency) and Unity XR InputDevice
+        /// (can bind the wrong node when hand tracking is on).
+        ///
+        /// Same Pico / PROTOCOL basis: axisX = left/right (right+), axisY = forward/back (forward+).
+        /// PC wrapper negates Y; Z+Yaw mode then uses axisX→yaw, axisY→Z.
         /// </summary>
-        /// <param name="controllerDevice">The input device to read from</param>
-        /// <param name="json">The JsonData object to populate with controller input data</param>
-        private static void GetControllerJsonData(InputDevice controllerDevice, ref JsonData json)
+        private static void GetControllerJsonData(Handedness handedness, ref JsonData json)
         {
-            controllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxis, out var axis2D);
-            controllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out var axisClick);
-            controllerDevice.TryGetFeatureValue(CommonUsages.grip, out var grip);
-            controllerDevice.TryGetFeatureValue(CommonUsages.trigger, out var trigger);
-            controllerDevice.TryGetFeatureValue(CommonUsages.primaryButton, out var primaryButton);
-            controllerDevice.TryGetFeatureValue(CommonUsages.secondaryButton, out var secondaryButton);
-            controllerDevice.TryGetFeatureValue(CommonUsages.menuButton, out var menuButton);
+            bool isLeft = handedness == Handedness.Left;
+            var controllerMask = isLeft ? OVRInput.Controller.LTouch : OVRInput.Controller.RTouch;
+            var rawAxis = isLeft ? OVRInput.RawAxis2D.LThumbstick : OVRInput.RawAxis2D.RThumbstick;
+            var rawClick = isLeft ? OVRInput.RawButton.LThumbstick : OVRInput.RawButton.RThumbstick;
+            var rawGrip = isLeft ? OVRInput.RawAxis1D.LHandTrigger : OVRInput.RawAxis1D.RHandTrigger;
+            var rawTrigger = isLeft ? OVRInput.RawAxis1D.LIndexTrigger : OVRInput.RawAxis1D.RIndexTrigger;
+            // Touch face buttons: left X/Y, right A/B.
+            var rawPrimary = isLeft ? OVRInput.RawButton.X : OVRInput.RawButton.A;
+            var rawSecondary = isLeft ? OVRInput.RawButton.Y : OVRInput.RawButton.B;
+            var rawMenu = isLeft ? OVRInput.RawButton.Start : OVRInput.RawButton.None;
+
+            Vector2 axis2D = OVRInput.Get(rawAxis, controllerMask);
 
             json["axisX"] = axis2D.x;
             json["axisY"] = axis2D.y;
-            json["axisClick"] = axisClick;
-            json["grip"] = grip;
-            json["trigger"] = trigger;
-            json["primaryButton"] = primaryButton;
-            json["secondaryButton"] = secondaryButton;
-            json["menuButton"] = menuButton;
-            // Pose will be set by the QuestTrackingDataSource
-            // json["pose"] = GetPoseStr(position, rotation);
+            json["axisClick"] = OVRInput.Get(rawClick, controllerMask);
+            json["grip"] = OVRInput.Get(rawGrip, controllerMask);
+            json["trigger"] = OVRInput.Get(rawTrigger, controllerMask);
+            json["primaryButton"] = OVRInput.Get(rawPrimary, controllerMask);
+            json["secondaryButton"] = OVRInput.Get(rawSecondary, controllerMask);
+            json["menuButton"] = rawMenu != OVRInput.RawButton.None &&
+                                 OVRInput.Get(rawMenu, controllerMask);
         }
 
 
@@ -296,14 +275,9 @@ namespace Robot
         /// </summary>
         private void GetHandJsonData()
         {
-            // Clear previous data
-            _handData = new JsonData();
-
-            _leftHandData = new JsonData();
             GetOVRHandTrackingData(Handedness.Left, ref _leftHandData);
             _handData["leftHand"] = _leftHandData;
 
-            _rightHandData = new JsonData();
             GetOVRHandTrackingData(Handedness.Right, ref _rightHandData);
             _handData["rightHand"] = _rightHandData;
         }
@@ -321,32 +295,42 @@ namespace Robot
             json["count"] = 26; // Total number of bones
             json["scale"] = 1.0f;
 
-            JsonData jointLocationsJson = new JsonData();
-            jointLocationsJson.SetJsonType(JsonType.Array);
-            json["HandJointLocations"] = jointLocationsJson;
+            JsonData jointLocationsJson;
+            if (json.ContainsKey("HandJointLocations"))
+            {
+                jointLocationsJson = json["HandJointLocations"];
+            }
+            else
+            {
+                jointLocationsJson = new JsonData();
+                jointLocationsJson.SetJsonType(JsonType.Array);
+                json["HandJointLocations"] = jointLocationsJson;
+            }
 
-            Pose[] joints = new Pose[26]; // to be global variable
-
-            questTrackingDataSource.GetJoints(handedness, ref joints);
+            questTrackingDataSource.GetJoints(handedness, _jointPoseBuffer);
             float status = isActive ? 15.0f : 0.0f;
 
-            foreach (var joint in joints)
+            for (int i = 0; i < _jointPoseBuffer.Length; i++)
             {
-                var position = joint.position;
-                var rotation = joint.rotation;
+                JsonData jointJson;
+                if (i < jointLocationsJson.Count)
+                {
+                    jointJson = jointLocationsJson[i];
+                }
+                else
+                {
+                    jointJson = new JsonData();
+                    jointLocationsJson.Add(jointJson);
+                }
 
+                var position = _jointPoseBuffer[i].position;
+                var rotation = _jointPoseBuffer[i].rotation;
                 ConvertHandedness(ref position, ref rotation);
 
-                JsonData jointJson = new JsonData();
-
                 jointJson["p"] = GetPoseStr(position, rotation);
-
                 jointJson["s"] = status;
-
                 // Comply with PICO 4U output
                 jointJson["r"] = 0.0f;
-
-                jointLocationsJson.Add(jointJson);
             }
         }
 

@@ -1,10 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Oculus.Interaction;
 using Oculus.Interaction.Input;
 using Oculus.Interaction.Input.Visuals;
 using UnityEngine;
-using UnityEngine.Assertions;
 
 public class QuestTrackingDataSource : MonoBehaviour
 {
@@ -57,10 +55,9 @@ public class QuestTrackingDataSource : MonoBehaviour
     }
 
     /// <summary>
-    /// Gets the pose of the specified controller
+    /// World-space controller pose from the visual root (low latency).
+    /// Do not use Controller.TryGetPose here — TrackingToWorldTransformer adds noticeable teleop delay.
     /// </summary>
-    /// <param name="handedness">Which controller to get pose for (Left or Right)</param>
-    /// <returns>Pose of the specified controller</returns>
     public Pose GetControllerPose(Handedness handedness)
     {
         if (handedness == Handedness.Left)
@@ -69,19 +66,15 @@ public class QuestTrackingDataSource : MonoBehaviour
             var rot = leftControllerVisual.transform.rotation;
             return new Pose(pos, rot);
         }
-        else
-        {
-            var pos = rightControllerVisual.transform.position;
-            var rot = rightControllerVisual.transform.rotation;
-            return new Pose(pos, rot);
-        }
+
+        var rpos = rightControllerVisual.transform.position;
+        var rrot = rightControllerVisual.transform.rotation;
+        return new Pose(rpos, rrot);
     }
 
     /// <summary>
     /// Checks if the specified controller is currently active and tracking
     /// </summary>
-    /// <param name="handedness">Which controller to check (Left or Right)</param>
-    /// <returns>True if controller is active, false otherwise</returns>
     public bool IsControllerActive(Handedness handedness)
     {
         if (handedness == Handedness.Left)
@@ -95,8 +88,6 @@ public class QuestTrackingDataSource : MonoBehaviour
     /// <summary>
     /// Checks if hand tracking is currently active for the specified hand
     /// </summary>
-    /// <param name="handedness">Which hand to check (Left or Right)</param>
-    /// <returns>True if hand tracking is active, false otherwise</returns>
     public bool IsHandTrackingActive(Handedness handedness)
     {
         if (handedness == Handedness.Left)
@@ -110,9 +101,7 @@ public class QuestTrackingDataSource : MonoBehaviour
     /// <summary>
     /// Gets all joint poses for the specified hand
     /// </summary>
-    /// <param name="handedness">Which hand to get joint data for (Left or Right)</param>
-    /// <param name="poses">Array to populate with joint poses</param>
-    public void GetJoints(Handedness handedness, ref Pose[] poses)
+    public void GetJoints(Handedness handedness, Pose[] poses)
     {
         var joints = handedness == Handedness.Left ? leftHandJoints : rightHandJoints;
 

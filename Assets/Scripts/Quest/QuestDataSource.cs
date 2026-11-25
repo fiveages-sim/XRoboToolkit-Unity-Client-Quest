@@ -37,11 +37,11 @@ namespace Robot.Quest
             // Clear previous data
             _controllerDataJson.Clear();
 
-            // Get left controller data
+            // Unity 2021.3 has no XRNode.LeftController; LeftHand is the available node.
             InputDevice leftController = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
+
             if (leftController.isValid)
             {
-                // Get position and rotation
                 leftController.TryGetFeatureValue(CommonUsages.devicePosition, out Vector3 leftPosition);
                 leftController.TryGetFeatureValue(CommonUsages.deviceRotation, out Quaternion leftRotation);
 
@@ -52,11 +52,10 @@ namespace Robot.Quest
                 _controllerDataJson["left"]["rotation"] = GetRotationStr(leftRotation);
             }
 
-            // Get right controller data
             InputDevice rightController = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
+
             if (rightController.isValid)
             {
-                // Get position and rotation
                 rightController.TryGetFeatureValue(CommonUsages.devicePosition, out Vector3 rightPosition);
                 rightController.TryGetFeatureValue(CommonUsages.deviceRotation, out Quaternion rightRotation);
 

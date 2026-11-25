@@ -9257,7 +9257,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Shared network (connect USB first)
+  m_Text: Prefer USB (adb reverse)
 --- !u!1 &8579172313950937816
 GameObject:
   m_ObjectHideFlags: 0

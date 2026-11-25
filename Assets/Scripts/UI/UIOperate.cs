@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Net.Sockets;
+using System.Threading;
 using Robot;
 using Robot.Conf;
 // using Unity.XR.PICO.TOBSupport;
@@ -12,6 +15,15 @@ using UnityEngine.UI;
 
 public class UIOperate : MonoBehaviour
 {
+    /// <summary>
+    /// Quest wired path via PC-side <c>adb reverse tcp:63901 tcp:63901</c>.
+    /// Loopback never changes; only the reverse mapping can drop after unplug/reboot.
+    /// </summary>
+    private const string UsbLoopbackAddress = "127.0.0.1";
+    private const string PreferUsbPrefsKey = "UIOperate.PreferUsb";
+    private const float AutoConnectRetrySeconds = 2.0f;
+    private const int UsbProbeTimeoutMs = 400;
+
     public Text SN;
     public Text LocalIP;
     public Text TargetIP;
@@ -40,6 +52,14 @@ public class UIOperate : MonoBehaviour
 
     public Dropdown videoSourceDropdown;
 
+    private float _nextAutoConnectTime;
+    private volatile bool _usbProbeInFlight;
+    private volatile bool _usbProbeCompleted;
+    private volatile bool _usbProbeSucceeded;
+
+    /// <summary>True when Prefer USB (adb reverse) is checked.</summary>
+    public bool PreferUsbEnabled => NetshareTog != null && NetshareTog.isOn;
+
     // Start is called before the first frame update
     private void Awake()
     {
@@ -59,11 +79,22 @@ public class UIOperate : MonoBehaviour
         SendTog.onValueChanged.AddListener(OnSendTog);
         Version.text = "v: " + Application.version;
         // HighAccuracy.gameObject.SetActive(bodyModeDrop.value > 0);
-        NetshareTog.onValueChanged.AddListener(OnNetShareTog);
         // HighAccuracy.onValueChanged.AddListener(OnHighAccuracy);
         ReconnectBtn.onClick.AddListener(OnReconnectBtn);
-        //The shared network function is only available on B-end devices.
-        NetshareTog.gameObject.SetActive(false);
+
+        // Prefer USB (adb reverse): always available on Quest (unlike Pico enterprise tether).
+        if (NetshareTog != null)
+        {
+            NetshareTog.gameObject.SetActive(true);
+            bool preferUsb = PlayerPrefs.GetInt(PreferUsbPrefsKey, 0) == 1;
+            NetshareTog.SetIsOnWithoutNotify(preferUsb);
+            NetshareTog.onValueChanged.AddListener(OnNetShareTog);
+            if (preferUsb)
+            {
+                _nextAutoConnectTime = 0f;
+            }
+        }
+
         // Bypass getting sn via enterprise service to enable data transport
         SetDeviceSN("TestDevice");
         // bool intEnterprise = PXR_Enterprise.InitEnterpriseService();
@@ -94,9 +125,70 @@ public class UIOperate : MonoBehaviour
         {
             Debug.LogWarning("SendDataAction.action is null - input action not properly configured");
         }
-        
-        // set FPS to 90
-        OVRPlugin.systemDisplayFrequency = 90.0f;
+
+        // Pose sampling follows the headset display tick (TcpHandler samples in Update).
+        // Quest 3 / 3S support 120 Hz; requesting it raises the teleop ceiling from ~90.
+        ApplyDisplayFrequency(120f);
+    }
+
+    /// <summary>
+    /// Requests a headset display refresh rate. Teleop send rate is capped by this value
+    /// because tracking is published from Update. Falls back to the highest available
+    /// rate if the preferred value is unsupported.
+    /// </summary>
+    private static void ApplyDisplayFrequency(float preferredHz)
+    {
+        float[] available = null;
+        try
+        {
+            available = OVRPlugin.systemDisplayFrequenciesAvailable;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"OVRPlugin.systemDisplayFrequenciesAvailable failed: {e.Message}");
+        }
+
+        float selected = preferredHz;
+        if (available != null && available.Length > 0)
+        {
+            selected = available[0];
+            bool foundPreferred = false;
+            for (int i = 0; i < available.Length; i++)
+            {
+                float hz = available[i];
+                if (Mathf.Abs(hz - preferredHz) < 0.1f)
+                {
+                    selected = hz;
+                    foundPreferred = true;
+                    break;
+                }
+
+                if (hz > selected)
+                {
+                    selected = hz;
+                }
+            }
+
+            Debug.Log(
+                $"Display frequencies available=[{string.Join(", ", available)}], " +
+                $"preferred={preferredHz}, selected={selected} (foundPreferred={foundPreferred})");
+        }
+        else
+        {
+            Debug.LogWarning(
+                $"No OVR display frequencies reported; requesting {preferredHz} Hz directly.");
+        }
+
+        OVRPlugin.systemDisplayFrequency = selected;
+        // Keep Unity's player loop aligned with the headset refresh when possible.
+        Application.targetFrameRate = Mathf.RoundToInt(selected);
+        QualitySettings.vSyncCount = 0;
+
+        float actual = OVRPlugin.systemDisplayFrequency;
+        Debug.Log(
+            $"Applied display frequency request={selected} Hz, actual={actual} Hz, " +
+            $"targetFrameRate={Application.targetFrameRate}");
+        LogWindow.Info($"Display refresh: {actual:F0} Hz (teleop sample ceiling)");
     }
 
     private void OnSourceConfigOnOnInitialized()
@@ -132,7 +224,7 @@ public class UIOperate : MonoBehaviour
 
     public void TcpConnect(string ip)
     {
-        TargetIP.text = "PC Service: " + ip;
+        TargetIP.text = FormatTargetIpLabel(ip);
         ReconnectBtn.gameObject.SetActive(true);
         TcpHandler.Connect(ip);
         ConnectSuccess();
@@ -140,22 +232,30 @@ public class UIOperate : MonoBehaviour
 
     public void ConnectSuccess()
     {
-        TargetIP.text = "PC Service: " + TcpHandler.GetTargetIP;
+        TargetIP.text = FormatTargetIpLabel(TcpHandler.GetTargetIP);
+    }
+
+    private static string FormatTargetIpLabel(string ip)
+    {
+        if (IsUsbLoopback(ip))
+        {
+            return "PC Service: " + UsbLoopbackAddress + " (USB)";
+        }
+
+        return "PC Service: " + ip;
+    }
+
+    private static bool IsUsbLoopback(string ip)
+    {
+        return !string.IsNullOrEmpty(ip) &&
+               IPAddress.TryParse(ip, out var parsed) &&
+               IPAddress.IsLoopback(parsed);
     }
 
     private void OnBindEnterpriseService(bool bind)
     {
         Debug.Log("OnBindEnterpriseService " + bind);
-        if (bind)
-        {
-            //The shared network function is only available on B-end devices.
-            NetshareTog.gameObject.SetActive(true);
-            // PXR_Enterprise.GetSwitchSystemFunctionStatus(SystemFunctionSwitchEnum.SFS_USB_TETHERING,
-            //     (value) => { NetshareTog.SetIsOnWithoutNotify(value == 1); });
-            //
-            // string sn = PXR_Enterprise.StateGetDeviceInfo(SystemInfoEnum.EQUIPMENT_SN);
-            // SetDeviceSN(sn);
-        }
+        // Quest: Prefer USB toggle is always shown in Awake (adb reverse path).
     }
 
     private void SetDeviceSN(string sn)
@@ -167,14 +267,143 @@ public class UIOperate : MonoBehaviour
 
     private void OnNetShareTog(bool ison)
     {
-        //     Debug.Log("OnNetShareTog:" + ison);
-        //     if (ison)
-        //         PXR_Enterprise.SwitchSystemFunction(SystemFunctionSwitchEnum.SFS_USB_TETHERING, SwitchEnum.S_ON);
-        //     else
-        //         PXR_Enterprise.SwitchSystemFunction(SystemFunctionSwitchEnum.SFS_USB_TETHERING, SwitchEnum.S_OFF);
-        //
-        //     PXR_Enterprise.GetSwitchSystemFunctionStatus(SystemFunctionSwitchEnum.SFS_USB_TETHERING,
-        //         (value) => { Debug.Log("SFS_USB_TETHERING:" + value); });
+        Debug.Log("OnNetShareTog (Prefer USB):" + ison);
+        PlayerPrefs.SetInt(PreferUsbPrefsKey, ison ? 1 : 0);
+        PlayerPrefs.Save();
+
+        if (ison)
+        {
+            LogWindow.Info(
+                "Prefer USB on: auto-detecting adb reverse at 127.0.0.1:" +
+                TcpHandler.TCP_PORT + ". Run scripts/adb_reverse_teleop.sh on PC.");
+            _nextAutoConnectTime = 0f;
+            _usbProbeCompleted = false;
+            _usbProbeSucceeded = false;
+        }
+        else
+        {
+            LogWindow.Info("Prefer USB off: Enter IP / Wi‑Fi route left unchanged.");
+        }
+    }
+
+    /// <summary>
+    /// Pico-style USB priority: when Prefer USB is on, keep trying loopback.
+    /// Soft-probes before replacing a working Wi‑Fi route so a missing reverse
+    /// does not tear down Enter IP.
+    /// </summary>
+    private void EnsureUsbTcpConnected()
+    {
+        if (!PreferUsbEnabled || TcpHandler == null)
+        {
+            return;
+        }
+
+        if (TcpHandler.State == SocketState.CONNECTING)
+        {
+            return;
+        }
+
+        if (TcpHandler.State == SocketState.WORKING && IsUsbLoopback(TcpHandler.GetTargetIP))
+        {
+            return;
+        }
+
+        if (_usbProbeCompleted)
+        {
+            _usbProbeCompleted = false;
+            if (_usbProbeSucceeded)
+            {
+                if (TcpHandler.State == SocketState.WORKING &&
+                    !IsUsbLoopback(TcpHandler.GetTargetIP))
+                {
+                    Debug.LogWarning(
+                        "Replacing non-USB TCP route: target=" + TcpHandler.GetTargetIP);
+                }
+
+                Debug.Log(
+                    "USB auto-connect: " + UsbLoopbackAddress + ":" + TcpHandler.TCP_PORT);
+                TcpConnect(UsbLoopbackAddress);
+            }
+
+            return;
+        }
+
+        if (_usbProbeInFlight)
+        {
+            return;
+        }
+
+        if (Time.realtimeSinceStartup < _nextAutoConnectTime)
+        {
+            return;
+        }
+
+        _nextAutoConnectTime = Time.realtimeSinceStartup + AutoConnectRetrySeconds;
+
+        if (TcpHandler.State == SocketState.WORKING)
+        {
+            // Do not call TcpHandler.Connect yet — that would drop Wi‑Fi on probe failure.
+            StartUsbLoopbackProbe();
+            return;
+        }
+
+        Debug.Log("USB auto-connect: " + UsbLoopbackAddress + ":" + TcpHandler.TCP_PORT);
+        TcpConnect(UsbLoopbackAddress);
+    }
+
+    private void StartUsbLoopbackProbe()
+    {
+        if (_usbProbeInFlight)
+        {
+            return;
+        }
+
+        _usbProbeInFlight = true;
+        _usbProbeCompleted = false;
+        _usbProbeSucceeded = false;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            bool ok = ProbeUsbLoopbackReachable();
+            _usbProbeSucceeded = ok;
+            _usbProbeInFlight = false;
+            _usbProbeCompleted = true;
+        });
+    }
+
+    private static bool ProbeUsbLoopbackReachable()
+    {
+        Socket socket = null;
+        try
+        {
+            socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            IAsyncResult result = socket.BeginConnect(IPAddress.Loopback, TcpHandler.TCP_PORT, null, null);
+            bool signaled = result.AsyncWaitHandle.WaitOne(UsbProbeTimeoutMs);
+            if (!signaled || !socket.Connected)
+            {
+                return false;
+            }
+
+            socket.EndConnect(result);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        finally
+        {
+            if (socket != null)
+            {
+                try
+                {
+                    socket.Close();
+                }
+                catch (Exception)
+                {
+                    // ignore
+                }
+            }
+        }
     }
 
     public void OnQuit()
@@ -409,6 +638,8 @@ public class UIOperate : MonoBehaviour
             }
         }
 
+        EnsureUsbTcpConnected();
+
         if (AcontrolerTog != null && AcontrolerTog.isOn)
         {
             // Use Input Actions only
@@ -424,6 +655,15 @@ public class UIOperate : MonoBehaviour
     public void OnQuitBtn()
     {
         Application.Quit();
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        // Quest may reset refresh rate after focus changes; re-assert 120 when focused.
+        if (hasFocus)
+        {
+            ApplyDisplayFrequency(120f);
+        }
     }
 
     private void OnDestroy()

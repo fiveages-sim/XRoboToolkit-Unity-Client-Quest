@@ -17,6 +17,11 @@ public class CameraSendInputDialog : MonoBehaviour
     {
         CloseBtn.onClick.AddListener(OnCloseBtn);
         ConfirmBtn.onClick.AddListener(OnConfirmBtn);
+
+        if (TmpInput != null && TmpInput.GetComponent<QuestTmpKeyboard>() == null)
+        {
+            TmpInput.gameObject.AddComponent<QuestTmpKeyboard>();
+        }
     }
 
     private void OnDestroy()
@@ -34,10 +39,16 @@ public class CameraSendInputDialog : MonoBehaviour
 
     private void OnConfirmBtn()
     {
-        PlayerPrefs.SetString("CameraSendInputDialog", TmpInput.text);
+        string ip = (TmpInput != null ? TmpInput.text : string.Empty).Trim().Replace(" ", string.Empty);
+        if (TmpInput != null)
+        {
+            TmpInput.text = ip;
+        }
+
+        PlayerPrefs.SetString("CameraSendInputDialog", ip);
         if (OnConfirmCall != null)
         {
-            OnConfirmCall(TmpInput.text);
+            OnConfirmCall(ip);
         }
 
         gameObject.SetActive(false);

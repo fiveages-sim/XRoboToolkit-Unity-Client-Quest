@@ -67,7 +67,14 @@ public class RemoteCameraWindow : MonoBehaviour
 
     private void OnDisable()
     {
+        // Quest receive path uses RobotVisionUnityPluginQuest, not MediaDecoder.
+        // Only release MediaDecoder if that legacy path was actually started.
         MediaDecoder.release();
+        if (questPlugin != null)
+        {
+            questPlugin.CleanupPlugin();
+        }
+
         Debug.Log("RemoteCameraWindow OnDisable");
         TcpHandler.SendFunctionValue("StopReceivePcCamera", "");
     }
@@ -81,8 +88,7 @@ public class RemoteCameraWindow : MonoBehaviour
         // listenBtn.SetOn(false);
         // send close event to server
         NetworkCommander.Instance.CloseCamera();
-        // Clean up plugin
-        questPlugin.CleanupPlugin();
+        // Hide triggers OnDisable, which cleans up decoder/plugin once.
         gameObject.SetActive(false);
     }
 

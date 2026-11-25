@@ -61,11 +61,26 @@ public class MediaDecoder
     }
 
     /// <summary>
-    /// Releases MediaDecoder resources and cleans up native objects
+    /// Releases MediaDecoder resources and cleans up native objects.
+    /// No-op if never initialized — avoids constructing a Java peer just to tear it down
+    /// (a leak/churn pattern when Quest uses RobotVisionUnityPluginQuest instead).
     /// </summary>
     public static void release()
     {
+        if (_javaObj == null)
+        {
+            return;
+        }
+
         LogWindow.Info("Releasing MediaDecoder resources");
-        GetJavaObject().Call("release");
+        try
+        {
+            _javaObj.Call("release");
+        }
+        finally
+        {
+            _javaObj.Dispose();
+            _javaObj = null;
+        }
     }
 }

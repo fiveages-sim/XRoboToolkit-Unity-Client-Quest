@@ -190,14 +190,21 @@ public class RobotVisionUnityPluginQuest : MonoBehaviour
                 // Stop the decoder and cleanup resources
                 robotVisionPlugin.CallStatic("StopDecoder");
                 robotVisionPlugin.CallStatic("Release");
+                robotVisionPlugin = null;
 
                 if (enableDebugLogs)
                     Debug.Log("[RobotVisionPlugin] Plugin resources cleaned up");
             }
 
-            if (commandBuffer != null && Camera.main != null)
+            if (commandBuffer != null)
             {
-                Camera.main.RemoveCommandBuffer(CameraEvent.AfterForwardAlpha, commandBuffer);
+                if (Camera.main != null)
+                {
+                    Camera.main.RemoveCommandBuffer(CameraEvent.AfterForwardAlpha, commandBuffer);
+                }
+
+                commandBuffer.Release();
+                commandBuffer = null;
             }
 
             if (externalTexture != null)

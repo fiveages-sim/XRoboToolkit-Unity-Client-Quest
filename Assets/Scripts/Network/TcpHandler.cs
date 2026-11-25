@@ -1,6 +1,4 @@
 using System;
-using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
@@ -16,6 +14,7 @@ namespace Robot
     {
         public const string Tag = ">>Tcp ";
         public const int RECEIVE_TIME_OUT_DEFAULT = 25000;
+        public const int CONNECT_TIME_OUT_MS = 8000;
         public const int BUFFER_LEN = 1024 * 63;
         public const int TCP_PORT = 63901;
 
@@ -35,7 +34,9 @@ namespace Robot
         private SocketState _state = SocketState.NONE;
 
         private bool _connectInited = false;
-        private static string _address = "127.0.0.1"; // PC IP Address
+        // Placeholder only. Quest must connect to the PC LAN IP (e.g. 192.168.x.x),
+        // not 127.0.0.1 — loopback is the headset itself unless adb reverse is set up.
+        private static string _address = "127.0.0.1";
         private int _port = 8888; //PC Port
         private int _sendTimeout = 15000; // timeout
         private Thread _sendThread;
@@ -45,10 +46,16 @@ namespace Robot
         private JsonData _trackingJsonData = new JsonData();
         private JsonData _sendJson = new JsonData();
         private TrackingData _trackingData = new TrackingData();
-        private ConcurrentQueue<string> _sendTrackingMsg = new ConcurrentQueue<string>();
+        // Latest-wins slot (not a deep queue). Old "Count < 2 then skip sampling" turned
+        // brief TCP stalls into multi-frame teleop gaps (probe p99/max 60–140ms).
+        private readonly object _trackingLatestLock = new object();
+        private string _latestTrackingEnvelope;
+        private int _latestTrackingVersion;
+        private int _lastSentTrackingVersion;
         private float _lastHeardSend = 0;
         private float _lastReconnectTime = 0;
         private bool _reconnectEnable = false;
+        private float _connectStartRealtime = -1f;
 
         private void Awake()
         {
@@ -101,12 +108,14 @@ namespace Robot
 
 
                     _state = SocketState.CONNECTING;
+                    _connectStartRealtime = Time.realtimeSinceStartup;
                     _socket.BeginConnect(ia, _port, ConnectCallback, _socket);
                 }
             }
             catch (SocketException e)
             {
                 _state = SocketState.CONNECT_ERROR;
+                _connectStartRealtime = -1f;
                 ConnectErrorInfo = e.Message;
                 LogWindow.Error($"TCP connection failed: {e.Message}");
                 Debug.LogError(Tag + "Connection failed: " + e.Message);
@@ -122,6 +131,7 @@ namespace Robot
                 {
                     _reconnectEnable = true;
                     socket.EndConnect(async);
+                    _connectStartRealtime = -1f;
                     _state = SocketState.WORKING;
                     LogWindow.Info("TCP socket connection established successfully");
 
@@ -255,13 +265,31 @@ namespace Robot
 
         private void Update()
         {
-            if (SendTrackingData)
+            // BeginConnect can hang forever on unreachable hosts; fail the UI out of Connecting.
+            if (_state == SocketState.CONNECTING &&
+                _connectStartRealtime >= 0f &&
+                (Time.realtimeSinceStartup - _connectStartRealtime) * 1000f >= CONNECT_TIME_OUT_MS)
             {
-                if (_sendTrackingMsg.Count < 2)
-                {
-                    _trackingData.Get(ref _trackingJsonData);
-                    _sendTrackingMsg.Enqueue(_trackingJsonData.ToJson());
-                }
+                bool loopback = IPAddress.TryParse(_address, out var parsedAddr) &&
+                                IPAddress.IsLoopback(parsedAddr);
+                ConnectErrorInfo = loopback
+                    ? $"Connect timeout after {CONNECT_TIME_OUT_MS / 1000}s to {_address}:{TCP_PORT}. " +
+                      "For Prefer USB / wired teleop, run on PC: adb reverse tcp:63901 tcp:63901 " +
+                      "(and ensure roboticsservice is listening)."
+                    : $"Connect timeout after {CONNECT_TIME_OUT_MS / 1000}s to {_address}:{TCP_PORT}. " +
+                      "Use the PC LAN IP (not 127.0.0.1), ensure roboticsservice is running, same Wi‑Fi, port 63901 open.";
+                LogWindow.Error(ConnectErrorInfo);
+                _connectStartRealtime = -1f;
+                Close();
+                _state = SocketState.CONNECT_ERROR;
+            }
+
+            if (SendTrackingData && State == SocketState.WORKING)
+            {
+                // Always sample on the display tick; overwrite pending payload so a slow
+                // TCP send never blocks pose capture (drop-old / keep-latest).
+                _trackingData.Get(ref _trackingJsonData);
+                PublishLatestTracking(_trackingJsonData.ToJson());
             }
 
             if (State == SocketState.WORKING)
@@ -350,6 +378,35 @@ namespace Robot
         }
 
 
+        private void PublishLatestTracking(string trackingJson)
+        {
+            _sendJson["functionName"] = "Tracking";
+            _sendJson["value"] = trackingJson;
+            string envelope = _sendJson.ToJson();
+            lock (_trackingLatestLock)
+            {
+                _latestTrackingEnvelope = envelope;
+                _latestTrackingVersion++;
+            }
+        }
+
+        private bool TryConsumeLatestTracking(out string envelope)
+        {
+            lock (_trackingLatestLock)
+            {
+                if (_latestTrackingVersion == _lastSentTrackingVersion ||
+                    string.IsNullOrEmpty(_latestTrackingEnvelope))
+                {
+                    envelope = null;
+                    return false;
+                }
+
+                envelope = _latestTrackingEnvelope;
+                _lastSentTrackingVersion = _latestTrackingVersion;
+                return true;
+            }
+        }
+
         private void OnSendThread()
         {
             while (_state != SocketState.DESTROY)
@@ -362,91 +419,93 @@ namespace Robot
 
                 try
                 {
+                    bool sentSomething = false;
+                    SocketError socketError = SocketError.Success;
+
                     lock (_sendObject)
                     {
-                        SocketError socketError = SocketError.Success;
-                        if (_socket != null && _socket.Connected)
+                        if (_socket == null || !_socket.Connected)
                         {
-                            //Sending general messages
-                            while (_sendDatas.Count > 0)
+                            Close();
+                            continue;
+                        }
+
+                        // Sending general messages
+                        while (_sendDatas.Count > 0)
+                        {
+                            SendData sendData = _sendDatas.Dequeue();
+                            byte[] data = PackageHandle.Pack(sendData.Cmd, sendData.Content);
+
+                            int totalBytes = data.Length;
+                            int bytesSent = 0;
+                            while (bytesSent < totalBytes)
                             {
-                                SendData sendData = _sendDatas.Dequeue();
-
-                                byte[] data = PackageHandle.Pack(sendData.Cmd, sendData.Content);
-
-                                int totalBytes = data.Length;
-                                int bytesSent = 0;
-                                while (bytesSent < totalBytes)
+                                int remainingBytes = totalBytes - bytesSent;
+                                bytesSent += _socket.Send(data, bytesSent, remainingBytes,
+                                    SocketFlags.None,
+                                    out socketError);
+                                if (socketError == SocketError.Success)
                                 {
-                                    int remainingBytes = totalBytes - bytesSent;
-                                    bytesSent += _socket.Send(data, bytesSent, remainingBytes,
-                                        SocketFlags.None,
-                                        out socketError);
-                                    if (socketError == SocketError.Success)
+                                    if (sendData.Cmd == NetCMD.PACKET_CCMD_SEND_VERSION)
                                     {
-                                        if (sendData.Cmd == NetCMD.PACKET_CCMD_SEND_VERSION)
-                                        {
-                                            //This message has been successfully sent, indicating the establishment of communication with the PC side
-                                            LogWindow.Info("PC connection established - version packet sent successfully");
-                                            Debug.Log("pc connected !");
-                                            _connectInited = true;
-                                        }
+                                        LogWindow.Info(
+                                            "PC connection established - version packet sent successfully");
+                                        Debug.Log("pc connected !");
+                                        _connectInited = true;
                                     }
-                                    else
-                                    {
-                                        break;
-                                    }
+
+                                    sentSomething = true;
                                 }
-
-                                if (socketError != SocketError.Success)
+                                else
                                 {
-                                    LogWindow.Error($"TCP send error: {socketError}");
-                                    Debug.LogError(Tag + "send SocketError:" + socketError);
-                                    Close();
                                     break;
                                 }
                             }
 
-                            //Tracking data transmission
-                            if (_connectInited && SendTrackingData)
+                            if (socketError != SocketError.Success)
                             {
-                                if (_sendTrackingMsg.Count > 0)
-                                {
-                                    _sendTrackingMsg.TryDequeue(out var msg);
-                                    //Display the frequency of tracking data occurrence
-                                    FPSDisplay.UpdateTime();
-                                    _sendJson["functionName"] = "Tracking";
-                                    _sendJson["value"] = msg;
+                                LogWindow.Error($"TCP send error: {socketError}");
+                                Debug.LogError(Tag + "send SocketError:" + socketError);
+                                Close();
+                                break;
+                            }
+                        }
 
-                                    byte[] data = PackageHandle.Pack(NetCMD.PACKET_CCMD_TO_CONTROLLER_FUNCTION,
-                                        Encoding.UTF8.GetBytes(_sendJson.ToJson()));
+                        // Tracking: send at most the newest pose; skip backlog.
+                        if (socketError == SocketError.Success &&
+                            _connectInited &&
+                            SendTrackingData &&
+                            TryConsumeLatestTracking(out var envelope))
+                        {
+                            FPSDisplay.UpdateTime();
+                            byte[] data = PackageHandle.Pack(NetCMD.PACKET_CCMD_TO_CONTROLLER_FUNCTION,
+                                Encoding.UTF8.GetBytes(envelope));
 
-                                    int res = _socket.Send(data, 0, data.Length, SocketFlags.None,
-                                        out socketError);
-                                    if (res < data.Length)
-                                    {
-                                        Debug.LogWarning(Tag + "Incomplete data occurrence!");
-                                    }
+                            int res = _socket.Send(data, 0, data.Length, SocketFlags.None,
+                                out socketError);
+                            if (res < data.Length)
+                            {
+                                Debug.LogWarning(Tag + "Incomplete data occurrence!");
+                            }
 
-
-                                    if (socketError != SocketError.Success)
-                                    {
-                                        LogWindow.Error($"TCP tracking data send error: {socketError}");
-                                        Debug.LogError(Tag + "SocketError:" + socketError);
-                                        Close();
-                                        continue;
-                                    }
-                                }
+                            if (socketError != SocketError.Success)
+                            {
+                                LogWindow.Error($"TCP tracking data send error: {socketError}");
+                                Debug.LogError(Tag + "SocketError:" + socketError);
+                                Close();
                             }
                             else
                             {
-                                Thread.Sleep(14);
+                                sentSomething = true;
                             }
                         }
-                        else
-                        {
-                            Close();
-                        }
+                    }
+
+                    // Never busy-spin while holding the socket lock (previous path did when
+                    // SendTrackingData was on and the queue was empty).
+                    if (_state == SocketState.WORKING && !sentSomething)
+                    {
+                        Thread.Sleep(SendTrackingData ? 1 : 14);
                     }
                 }
                 catch (Exception e)
