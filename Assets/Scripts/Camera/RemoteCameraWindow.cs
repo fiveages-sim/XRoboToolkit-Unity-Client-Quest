@@ -1,11 +1,9 @@
 using System.Collections;
 using UnityEngine;
-using System.Net.Sockets;
-using System.Threading;
-using System.Threading.Tasks;
 using LitJson;
 using Network;
 using Robot;
+using Robot.V2.Network;
 using UnityEngine.UI;
 
 
@@ -16,21 +14,13 @@ using UnityEngine.UI;
 public class RemoteCameraWindow : MonoBehaviour
 {
     public RawImage RemoteCameraImage;
-    private TcpListener _tcpListener;
-    private TcpClient _client;
-    private NetworkStream _stream;
     private Texture2D _texture;
     public Texture Texture => RemoteCameraImage.texture;
-    private byte[] _imageBuffer;
-    private CancellationTokenSource _receiveImageTs = null;
-    private Task _imageReceiveTask;
 
     private int _resolutionWidth = 2160;
     private int _resolutionHeight = 2160 / 2 * 4 / 3;
     private int _videoFps = 60;
     private int _bitrate = 40 * 1024 * 1024;
-
-    // public CustomButton listenBtn;
 
     public RobotVisionUnityPluginQuest questPlugin;
 
@@ -75,6 +65,27 @@ public class RemoteCameraWindow : MonoBehaviour
             questPlugin.CleanupPlugin();
         }
 
+        // StopDecoder tears down :12345 listen — must also drop the control client,
+        // otherwise fa-py keeps PINGing on :13579 while video is dead (black RGB).
+        try
+        {
+            if (NetworkCommander.Instance != null)
+            {
+                NetworkCommander.Instance.CloseCamera();
+            }
+        }
+        catch (System.Exception)
+        {
+            // ignore if commander not ready during teardown
+        }
+
+        if (TcpManager.Instance != null &&
+            (Robot.V2.Network.TcpClient.Status == ClientStatus.Connected ||
+             Robot.V2.Network.TcpClient.Status == ClientStatus.Connecting))
+        {
+            TcpManager.Instance.StopClient();
+        }
+
         Debug.Log("RemoteCameraWindow OnDisable");
         TcpHandler.SendFunctionValue("StopReceivePcCamera", "");
     }
@@ -86,9 +97,7 @@ public class RemoteCameraWindow : MonoBehaviour
     {
         // Reset listen button
         // listenBtn.SetOn(false);
-        // send close event to server
-        NetworkCommander.Instance.CloseCamera();
-        // Hide triggers OnDisable, which cleans up decoder/plugin once.
+        // Hide triggers OnDisable (CLOSE_CAMERA + StopClient + plugin cleanup).
         gameObject.SetActive(false);
     }
 
@@ -111,7 +120,8 @@ public class RemoteCameraWindow : MonoBehaviour
         yield return null;
 
         JsonData cameraParam = new JsonData();
-        cameraParam["ip"] = Utils.GetLocalIPv4();
+        // Legacy MediaDecoder path (Quest uses questPlugin). Keep peer-aware IP.
+        cameraParam["ip"] = UsbAdbTeleop.ResolveHeadsetCallbackIp(null);
         cameraParam["port"] = port;
         cameraParam["width"] = _resolutionWidth;
         cameraParam["height"] = _resolutionHeight;

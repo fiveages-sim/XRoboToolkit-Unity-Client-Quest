@@ -8,57 +8,82 @@ Related: [XRoboToolkit-Unity-Client](https://github.com/XR-Robotics/XRoboToolkit
 
 ## Features
 
-- Pose sync (head / controller / hand) to PC `roboticsservice`
-- Prefer USB (`adb reverse`) for low-jitter ~120 Hz teleop; Wi‑Fi / Enter IP still available
+- Pose sync (head / controller / hand) → PC `roboticsservice` (`:63901`)
+- Prefer USB (`adb reverse`) or Wi‑Fi / Enter IP
+- Remote Vision: receive H.264 from fa-py / Orin / PICO 4U (`:13579` cmd + `:12345` video)
 - Local pose recording
-- Remote stereo vision (PICO 4U / PC / ZED via Orin)
 
 Unity **2021.3.45f2** · Meta XR Interaction SDK 72 · Oculus XR Plugin 3.4.1
 
+## Architecture (pose vs camera)
+
+| Path | Direction | Ports | Notes |
+|------|-----------|-------|--------|
+| Tracking | Headset → PC | `63901` | Independent of camera |
+| Camera command | Headset → PC (or other sender) | `13579` | Listen dialog IP = command host |
+| Camera video | PC → Headset | `12345` | PC reverse-connects to callback IP in `OPEN_CAMERA` |
+
+Pose TCP target (`127.0.0.1` vs `192.168.x.x`) does **not** lock the camera path. Camera IP can be any push sender; when that sender is the same PC, use USB loopback or LAN as below.
+
+**USB (Pico community model):** PC Service hook maintains
+
+- `adb reverse 63901` + `13579` (headset → PC)
+- `adb forward 12345` (PC → headset)
+
+Open **XRoboToolkit-PC-Service** after `fa-py` `init` / USB helper install. Manual fallback lives in fa-py: `vr_pose_publisher/scripts/adb_reverse_teleop.sh` (not duplicated in this repo).
+
 ## Usage
 
-### 1. Start PC service
+### 1. PC service
 
 - Windows: `\Program Files (x86)\roboticsservice\runService.bat`
-- Linux: `/opt/apps/roboticsservice/runService.sh`
+- Linux: `/opt/apps/roboticsservice/runService.sh`  
+  (with fa-py USB helper: tunnels refresh while service runs; log `/tmp/xrt-adb-reverse.log`)
 
-Service listens on TCP **63901** (fixed protocol port; unchanged when swapping Meta devices).
+### 2. Quest → PC (pose)
 
-### 2. Connect Quest → PC
+**Wi‑Fi:** same LAN → Enter IP `192.168.x.x` → Head/Controller/Hand → **Send**. Prefer USB **off** if you want to stay on LAN.
 
-**Wi‑Fi:** same network → open app → pick discovered IP, or **Enter IP** with the PC LAN address → enable Head/Controller → **Send**.
+**USB:** Prefer USB on (or Enter IP / Connect `127.0.0.1`). Status: `PC Service: 127.0.0.1 (USB)`.
 
-**USB (recommended):**
+Hybrid: an explicit LAN Enter IP **stays** while connected; Prefer USB only auto-fills loopback when disconnected. Tap **Connect** (Prefer USB on) to switch back to USB.
 
-```bash
-# PC: USB debugging on; one device, or pass serial if several
-./scripts/adb_reverse_teleop.sh
-# or: adb reverse tcp:63901 tcp:63901
-# multi-device: ./scripts/adb_reverse_teleop.sh 63901 <serial>
-```
+### 3. Remote Vision (optional)
 
-On Quest: check **Prefer USB (adb reverse)** (auto-connects `127.0.0.1`), or Enter IP `127.0.0.1`. Status shows `PC Service: 127.0.0.1 (USB)`.
+Select **ZEDMINI** (`camera=ZED`) for fa-py `/head_camera/rgb` (not PICO4U / VR).
 
-Re-run reverse after unplug, `adb kill-server`, reboot, or switching headsets. `127.0.0.1` and port `63901` do not change per device.
+- **Wi‑Fi:** Listen → PC LAN IP (e.g. `192.168.110.37`)
+- **USB:** Listen → `127.0.0.1` (needs reverse `13579` + forward `12345`)
 
-Prefer USB and Enter IP coexist: LAN Enter IP still works; with Prefer USB on, a working reverse takes priority.
+After Listen, PC may log `推流会话启动` before the first frame: encoder init + connect retries to `:12345` (fa-py ~15s budget). Quest only waits for decoder texture readiness (no long fixed sleep). If PC logs “连不上头显视频端口”, close the camera window and Listen again.
 
-### 3. Record / vision (optional)
+Other sources: **PICO4U** → PICO LAN IP; **ZED/Orin** → [OrinVideoSender](https://github.com/XR-Robotics/XRoboToolkit-Orin-Video-Sender) IP (or `127.0.0.1` with USB tunnels).
 
-- **Record:** select tracking → Record (data under device `/Download`; see Log).
-- **PICO 4U → Quest:** both on same LAN → Quest Camera → PICO4U → Listen → PICO IP. B switches SBS / stereo.
-- **ZED (Orin):** run [OrinVideoSender](https://github.com/XR-Robotics/XRoboToolkit-Orin-Video-Sender) → Quest Camera → ZEDMINI → Listen → Orin IP.
+### 4. Record
 
-### Panel (short)
+Tracking toggles → Record (device `/Download`; see Log).
+
+## Panel
 
 | Area | Notes |
 |------|--------|
-| Network | SN / IP / FPS / status / PC Service / Enter IP / Prefer USB |
-| Tracking | Head, Controller, Hand, Send, Switch w/ A |
+| Network | SN / IP / FPS / PC Service / Enter IP / Prefer USB |
+| Tracking | Head, Controller, Hand, Send |
 | Remote Vision | Video source, Listen |
 | Data Collection | Record pose |
 
 ![ui.png](Docs/ui.png)
+
+## Build notes (Linux / Fedora)
+
+**`No usable version of libssl`:** Unity 2021 Roslyn needs OpenSSL 1.1; Fedora ships 3.x. Quit Hub/Editor started as `UnityHub-*.AppImage.real`, then:
+
+```bash
+./scripts/open_unity_fedora.sh
+# or: unityhub-fedora / unity-editor-fedora -projectpath "$PWD"
+```
+
+**`Win32Exception` / `Process.Kill` in device list:** usually adb conflict noise. Prefer **Build** APK → `adb install -r -g Your.apk`.
 
 ## Citation
 

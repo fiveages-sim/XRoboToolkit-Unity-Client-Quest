@@ -129,8 +129,8 @@ public partial class UICameraCtrl : MonoBehaviour
             // Update camera source, including shaders, etc.
             videoSourceManager.UpdateVideoSource(cameraSource);
 
-            // send video stream request to the server
-            CameraSendInputDialog.Show(RequestCameraStream);
+            // Always show IP dialog (USB: enter 127.0.0.1; Wi‑Fi: PC LAN IP).
+            CameraSendInputDialog.Show(RequestCameraStream, null);
         }
         else
         {
@@ -145,54 +145,112 @@ public partial class UICameraCtrl : MonoBehaviour
 
     IEnumerator RequestCameraStreamCoroutine(string ip)
     {
+        // Command host: LAN IP (Wi‑Fi) or 127.0.0.1 (USB reverse 13579).
+        ip = UsbAdbTeleop.ResolvePcHost(ip);
+        if (string.IsNullOrEmpty(ip))
+        {
+            LogWindow.Error("Camera source IP is empty.");
+            yield break;
+        }
+
         if (TcpServer.Status == ServerStatus.Started)
         {
-            // Close TcpServer first
             TcpManager.Instance.StopServer();
         }
 
+        // Always drop a stale control client before Listen (Pico-style).
+        if (TcpClient.Status == ClientStatus.Connected ||
+            TcpClient.Status == ClientStatus.Connecting)
+        {
+            TcpManager.Instance.StopClient();
+            yield return new WaitForSeconds(0.1f);
+        }
+
         yield return new WaitForSeconds(0.1f);
 
-        // Get camera parameters
         var camPara = VideoSourceConfigManager.Instance.CameraParameters;
+        var cameraType = VideoSourceConfigManager.Instance.CurrentVideoSource != null
+            ? VideoSourceConfigManager.Instance.CurrentVideoSource.camera
+            : "";
+        if (string.Equals(cameraType, "VR", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(cameraType, "PICO4U", StringComparison.OrdinalIgnoreCase))
+        {
+            LogWindow.Warn(
+                $"Video source camera={cameraType} is headset-capture; PC /head_camera/rgb will not push. " +
+                "Select ZEDMINI (camera=ZED) for fa-py Remote Vision.");
+        }
 
-        // Start listening to the camera
+        streamingPort = UsbAdbTeleop.CameraVideoPort;
         RemoteCameraWindowObj.SetActive(true);
-        RemoteCameraWindowObj.GetComponent<RemoteCameraWindow>().StartListen(camPara.width, camPara.height, camPara.fps,
+        var remoteWindow = RemoteCameraWindowObj.GetComponent<RemoteCameraWindow>();
+        remoteWindow.StartListen(camPara.width, camPara.height, camPara.fps,
             camPara.bitrate, streamingPort);
 
-        yield return new WaitForSeconds(0.2f);
+        // Wait until native texture callback fires. TCP :12345 may still bind a
+        // moment later — fa-py _StreamSession retries connect (~15s); no fixed 1.5s sleep.
+        float listenDeadline = Time.realtimeSinceStartup + 8f;
+        var questPlugin = remoteWindow.questPlugin;
+        while (questPlugin != null &&
+               !questPlugin.IsPluginInitialized() &&
+               Time.realtimeSinceStartup < listenDeadline)
+        {
+            yield return null;
+        }
 
-        // Reset LERE
+        if (questPlugin != null && !questPlugin.IsPluginInitialized())
+        {
+            LogWindow.Error(
+                "Quest video decoder did not become ready in time (port " + streamingPort + "). " +
+                "Close the camera window and Listen again.");
+            yield break;
+        }
+
+        yield return null; // one frame for Surface / listen handoff
+
         setLere.ResetCanvases();
 
-        yield return new WaitForSeconds(0.1f);
+        TcpManager.Instance.StartClient(ip);
+        float connectDeadline = Time.realtimeSinceStartup + 5f;
+        while (TcpClient.Status != ClientStatus.Connected &&
+               TcpClient.Status != ClientStatus.Disconnected &&
+               Time.realtimeSinceStartup < connectDeadline)
+        {
+            yield return null;
+        }
 
         if (TcpClient.Status != ClientStatus.Connected)
         {
-            // initialize TcpClient, server IP is the video source IP
-            TcpManager.Instance.StartClient(ip);
+            LogWindow.Error(
+                $"Camera control connect failed to {ip}:{UsbAdbTeleop.CameraCommandPort}. " +
+                (UsbAdbTeleop.IsLoopback(ip)
+                    ? "Check adb reverse tcp:13579 and that fa-py video sender is listening."
+                    : "Check fa-py --video-port / firewall / same LAN."));
+            yield break;
         }
 
-        yield return new WaitForSeconds(0.5f);
+        // Callback IP must match the path: loopback only for USB end-to-end.
+        var callbackIp = UsbAdbTeleop.ResolveHeadsetCallbackIp(ip);
+        if (callbackIp == "Not found" || string.IsNullOrEmpty(callbackIp))
+        {
+            LogWindow.Error("Could not resolve headset callback IP for video return path.");
+            yield break;
+        }
 
-        var localIP = Utils.GetLocalIPv4();
-
-        // Send request to the server
         var customConfig = CameraRequestSerializer.FromCameraParameters(
             camPara,
             0,
-            2, // (int)PXRCaptureRenderMode.PXRCapture_RenderMode_3D
-            VideoSourceConfigManager.Instance.CurrentVideoSource.camera,
-            localIP, // local ip
+            2,
+            cameraType,
+            callbackIp,
             streamingPort);
-        
-        LogWindow.Info("Requesting camera stream with config: " + customConfig.ToString());
 
-        // Utils.WriteLog(logTag, $"send camera config: {customConfig}");
+        LogWindow.Info(
+            $"Remote Vision: command→{ip}:{UsbAdbTeleop.CameraCommandPort}, " +
+            $"video←{callbackIp}:{streamingPort}" +
+            (UsbAdbTeleop.IsLoopback(ip) ? " (USB: need adb forward tcp:12345)" : " (Wi‑Fi)"));
+        LogWindow.Info("Requesting camera stream with config: " + customConfig);
+
         var data = CameraRequestSerializer.Serialize(customConfig);
-
-        // Use network commander
         NetworkCommander.Instance.OpenCamera(data);
     }
 

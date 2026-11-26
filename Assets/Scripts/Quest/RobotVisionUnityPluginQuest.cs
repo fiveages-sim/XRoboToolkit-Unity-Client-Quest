@@ -65,6 +65,9 @@ public class RobotVisionUnityPluginQuest : MonoBehaviour
     {
         try
         {
+            // Re-Listen without a full disable would otherwise stack CommandBuffers / textures.
+            CleanupPlugin();
+
             if (enableDebugLogs)
                 Debug.Log($"[RobotVisionPlugin] Initializing plugin with dimensions: {width}x{height}, port: {port}");
 

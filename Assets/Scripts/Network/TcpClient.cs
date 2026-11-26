@@ -6,6 +6,7 @@ namespace Robot.V2.Network
     public enum ClientStatus
     {
         None,
+        Connecting,
         Connected,
         Disconnected,
     }
@@ -54,9 +55,10 @@ namespace Robot.V2.Network
         public static void ConnectToServer(string ip, int port, Action onConnected)
         {
             LogWindow.Info($"Attempting to connect to server at {ip}:{port}");
+            Status = ClientStatus.Connecting;
             _callbackProxy.OnConnected = onConnected;
             GetJavaObject().Call("connectToServer", ip, port, _callbackProxy);
-            Status = ClientStatus.Connected;
+            // Status becomes Connected only in onConnected (async JNI).
         }
 
         /// <summary>
@@ -120,6 +122,11 @@ namespace Robot.V2.Network
         {
             Utils.WriteLog(logTag, $"Java TcpClient: Error - {errorMessage} - {exception}");
             LogWindow.Error($"TCP Client error: {errorMessage}");
+            if (Status == ClientStatus.Connecting)
+            {
+                Status = ClientStatus.Disconnected;
+            }
+
             OnError?.Invoke(errorMessage, new Exception($"{errorMessage} - {exception}"));
         }
     }

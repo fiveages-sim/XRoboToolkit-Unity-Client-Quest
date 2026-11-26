@@ -1,5 +1,6 @@
 using System;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using UnityEngine;
 
@@ -19,23 +20,176 @@ namespace Robot
         }
 
         /// <summary>
-        /// Gets the local IPv4 address of the machine
+        /// Gets a usable local IPv4. When <paramref name="preferredPeerIp"/> is set,
+        /// prefers a WLAN address on the same subnet (mask-aware; not hard-coded /24)
+        /// so PC Wi‑Fi reverse-connect for video reaches the headset.
         /// </summary>
-        /// <returns>Local IPv4 address as a string, or "Not found" if none available</returns>
-        //Obtain the local IPv4 address
-        public static string GetLocalIPv4()
+        public static string GetLocalIPv4(string preferredPeerIp = null)
         {
-            string localIP = "Not found";
+            IPAddress peer = null;
+            if (!string.IsNullOrEmpty(preferredPeerIp) &&
+                IPAddress.TryParse(preferredPeerIp, out var parsedPeer) &&
+                parsedPeer.AddressFamily == AddressFamily.InterNetwork &&
+                !IPAddress.IsLoopback(parsedPeer))
+            {
+                peer = parsedPeer;
+            }
+
+            string sameSubnetWifi = null;
+            string sameSubnetAny = null;
+            string anyWifi = null;
+            string anyUnicast = null;
+
+            try
+            {
+                foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (nic.OperationalStatus != OperationalStatus.Up)
+                    {
+                        continue;
+                    }
+
+                    var type = nic.NetworkInterfaceType;
+                    if (type == NetworkInterfaceType.Loopback ||
+                        type == NetworkInterfaceType.Tunnel)
+                    {
+                        continue;
+                    }
+
+                    // USB tether / RNDIS often looks like Ethernet; prefer real Wi‑Fi for LAN peers.
+                    bool isWifi = type == NetworkInterfaceType.Wireless80211;
+                    string nicName = (nic.Name ?? "") + " " + (nic.Description ?? "");
+                    string nicLower = nicName.ToLowerInvariant();
+                    if (nicLower.Contains("rndis") || nicLower.Contains("usb") ||
+                        nicLower.Contains("docker") || nicLower.Contains("veth"))
+                    {
+                        if (peer != null && !isWifi)
+                        {
+                            continue;
+                        }
+                    }
+
+                    foreach (UnicastIPAddressInformation uni in nic.GetIPProperties().UnicastAddresses)
+                    {
+                        if (uni.Address.AddressFamily != AddressFamily.InterNetwork)
+                        {
+                            continue;
+                        }
+
+                        byte[] bytes = uni.Address.GetAddressBytes();
+                        if (bytes[0] == 127)
+                        {
+                            continue;
+                        }
+
+                        // Skip link-local 169.254.x.x
+                        if (bytes[0] == 169 && bytes[1] == 254)
+                        {
+                            continue;
+                        }
+
+                        string candidate = uni.Address.ToString();
+                        if (isWifi && anyWifi == null)
+                        {
+                            anyWifi = candidate;
+                        }
+
+                        if (anyUnicast == null)
+                        {
+                            anyUnicast = candidate;
+                        }
+
+                        if (peer != null && IsSameIpv4Subnet(uni.Address, peer, uni.IPv4Mask))
+                        {
+                            if (isWifi)
+                            {
+                                sameSubnetWifi = candidate;
+                            }
+                            else if (sameSubnetAny == null)
+                            {
+                                sameSubnetAny = candidate;
+                            }
+                        }
+                    }
+
+                    if (sameSubnetWifi != null)
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"GetLocalIPv4 NIC scan failed: {e.Message}");
+            }
+
+            if (sameSubnetWifi != null)
+            {
+                return sameSubnetWifi;
+            }
+
+            if (sameSubnetAny != null)
+            {
+                return sameSubnetAny;
+            }
+
+            if (peer != null && anyWifi != null)
+            {
+                return anyWifi;
+            }
+
+            if (anyWifi != null)
+            {
+                return anyWifi;
+            }
+
+            if (anyUnicast != null)
+            {
+                return anyUnicast;
+            }
+
+            // Legacy fallback
             foreach (IPAddress ip in Dns.GetHostAddresses(Dns.GetHostName()))
             {
-                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
                 {
-                    localIP = ip.ToString();
-                    break;
+                    return ip.ToString();
                 }
             }
 
-            return localIP;
+            return "Not found";
+        }
+
+        private static bool IsSameIpv4Subnet(IPAddress local, IPAddress peer, IPAddress mask)
+        {
+            if (local == null || peer == null)
+            {
+                return false;
+            }
+
+            byte[] a = local.GetAddressBytes();
+            byte[] b = peer.GetAddressBytes();
+            if (a.Length != 4 || b.Length != 4)
+            {
+                return false;
+            }
+
+            // Fall back to /23-ish match if mask missing (Quest sometimes omits IPv4Mask).
+            byte[] m = mask != null ? mask.GetAddressBytes() : new byte[] { 255, 255, 254, 0 };
+            if (m.Length != 4)
+            {
+                m = new byte[] { 255, 255, 254, 0 };
+            }
+
+            for (int i = 0; i < 4; i++)
+            {
+                if ((a[i] & m[i]) != (b[i] & m[i]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>

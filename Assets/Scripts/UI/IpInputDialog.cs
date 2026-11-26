@@ -78,9 +78,9 @@ public class IpInputDialog : MonoBehaviour
         }
         else if (uiRobot != null && uiRobot.PreferUsbEnabled)
         {
-            // Pico-style: Enter IP stays available; Prefer USB may reclaim once reverse is up.
             LogWindow.Info(
-                "Prefer USB is on: a working adb reverse may replace this Wi‑Fi route.");
+                "Prefer USB is on: this LAN IP will be kept while connected. " +
+                "Tap Connect (or re-toggle Prefer USB) to switch back to 127.0.0.1.");
         }
 
         PlayerPrefs.SetString(PrefsKey, ip);

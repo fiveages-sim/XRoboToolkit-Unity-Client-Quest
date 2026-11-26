@@ -30,9 +30,17 @@ public class CameraSendInputDialog : MonoBehaviour
         ConfirmBtn.onClick.RemoveListener(OnConfirmBtn);
     }
 
-    public void Show(Action<string> onConfirmCall)
+    public void Show(Action<string> onConfirmCall, string defaultIp = null)
     {
-        TmpInput.text = PlayerPrefs.GetString("CameraSendInputDialog", "");
+        if (!string.IsNullOrEmpty(defaultIp))
+        {
+            TmpInput.text = defaultIp;
+        }
+        else
+        {
+            TmpInput.text = PlayerPrefs.GetString("CameraSendInputDialog", "");
+        }
+
         OnConfirmCall = onConfirmCall;
         gameObject.SetActive(true);
     }
