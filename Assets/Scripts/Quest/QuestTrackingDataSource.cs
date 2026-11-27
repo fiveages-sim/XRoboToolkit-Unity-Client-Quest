@@ -18,15 +18,11 @@ public class QuestTrackingDataSource : MonoBehaviour
     public OVRControllerVisual leftControllerVisual;
     public OVRControllerVisual rightControllerVisual;
 
-    [Tooltip("Auto-attach ControllerSourceProbe (does not start until UI / StartProbe).")]
-    public bool enableControllerSourceProbe = true;
-
     private Transform _trackingSpace;
     private Pose _lastValidLeftPose = Pose.identity;
     private Pose _lastValidRightPose = Pose.identity;
     private bool _hasLastValidLeft;
     private bool _hasLastValidRight;
-    private ControllerSourceProbe _controllerSourceProbe;
 
     private Transform TrackingSpace
     {
@@ -43,38 +39,6 @@ public class QuestTrackingDataSource : MonoBehaviour
 
             return _trackingSpace;
         }
-    }
-
-    public ControllerSourceProbe ControllerSourceProbe => EnsureControllerSourceProbe();
-
-    private void Awake()
-    {
-        EnsureControllerSourceProbe();
-    }
-
-    /// <summary>
-    /// Ensures probe component exists on this object. Does <b>not</b> start recording;
-    /// use UI buttons or <see cref="ControllerSourceProbe.StartProbe"/>.
-    /// </summary>
-    public ControllerSourceProbe EnsureControllerSourceProbe()
-    {
-        if (!enableControllerSourceProbe)
-        {
-            return _controllerSourceProbe;
-        }
-
-        if (_controllerSourceProbe == null)
-        {
-            _controllerSourceProbe = GetComponent<ControllerSourceProbe>();
-        }
-
-        if (_controllerSourceProbe == null)
-        {
-            _controllerSourceProbe = gameObject.AddComponent<ControllerSourceProbe>();
-        }
-
-        _controllerSourceProbe.Configure(this, autoStart: false);
-        return _controllerSourceProbe;
     }
 
     /// <summary>
