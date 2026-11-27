@@ -749,34 +749,12 @@
                 },
                 {
                     "name": "",
-                    "id": "370f21e3-a80b-4b07-990b-299c2da0929a",
-                    "path": "<XRController>{LeftHand}/{Primary2DAxis}",
-                    "interactions": "",
-                    "processors": "ScaleVector2(x=0),StickDeadzone",
-                    "groups": "Generic XR Controller",
-                    "action": "Translate Anchor",
-                    "isComposite": false,
-                    "isPartOfComposite": false
-                },
-                {
-                    "name": "",
                     "id": "8f872fc5-75dc-49e5-9bbd-f2e4d4498c65",
                     "path": "<XRController>{LeftHand}/{Primary2DAxisClick}",
                     "interactions": "",
                     "processors": "",
                     "groups": "Generic XR Controller",
                     "action": "Scale Toggle",
-                    "isComposite": false,
-                    "isPartOfComposite": false
-                },
-                {
-                    "name": "",
-                    "id": "b21d690b-51fc-413f-a887-08a2a39af3fc",
-                    "path": "<XRController>{LeftHand}/{Primary2DAxis}",
-                    "interactions": "",
-                    "processors": "ScaleVector2(x=0),StickDeadzone",
-                    "groups": "Generic XR Controller",
-                    "action": "Scale Delta",
                     "isComposite": false,
                     "isPartOfComposite": false
                 }
@@ -1251,17 +1229,6 @@
                     "isPartOfComposite": false
                 },
                 {
-                    "name": "",
-                    "id": "4caf4e8d-13e5-4bd6-8f42-b6b99c315ad0",
-                    "path": "<XRController>{RightHand}/{Primary2DAxis}",
-                    "interactions": "",
-                    "processors": "ScaleVector2(x=0),StickDeadzone",
-                    "groups": "Generic XR Controller",
-                    "action": "Translate Anchor",
-                    "isComposite": false,
-                    "isPartOfComposite": false
-                },
-                {
                     "name": "2D Vector",
                     "id": "1d589a3a-b14c-473e-a085-719a3121f88e",
                     "path": "2DVector",
@@ -1324,17 +1291,6 @@
                     "processors": "",
                     "groups": "Generic XR Controller",
                     "action": "Scale Toggle",
-                    "isComposite": false,
-                    "isPartOfComposite": false
-                },
-                {
-                    "name": "",
-                    "id": "ef10c39a-2987-41bb-bb80-0e476240adaa",
-                    "path": "<XRController>{RightHand}/{Primary2DAxis}",
-                    "interactions": "",
-                    "processors": "ScaleVector2(x=0),StickDeadzone",
-                    "groups": "Generic XR Controller",
-                    "action": "Scale Delta",
                     "isComposite": false,
                     "isPartOfComposite": false
                 }

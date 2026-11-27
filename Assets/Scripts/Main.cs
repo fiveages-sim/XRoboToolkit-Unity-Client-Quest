@@ -11,9 +11,17 @@ public class Main : MonoBehaviour
         // DebugManager.instance.enableRuntimeUI = false;
         Application.logMessageReceived += OnLogMessageReceived;
         XRSettings.eyeTextureResolutionScale = 1.5f;
+        // Sticks = teleop data only; kill Meta ISDK stick turn/teleport on OVRCameraRig.
+        DisableMetaStickLocomotion.Apply();
         // PXR_Manager.EnableVideoSeeThrough = true;
         //Closing the security fence is only effective on B-end devices.
         // PXR_Enterprise.SwitchSystemFunction(SystemFunctionSwitchEnum.SFS_SECURITY_ZONE_PERMANENTLY, SwitchEnum.S_OFF);
+    }
+
+    private void Start()
+    {
+        // Prefab instances may finish activating after Awake — run once more.
+        DisableMetaStickLocomotion.Apply();
     }
 
     /// <summary>

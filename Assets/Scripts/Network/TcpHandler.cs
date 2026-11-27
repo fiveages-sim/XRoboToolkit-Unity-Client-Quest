@@ -286,10 +286,12 @@ namespace Robot
 
             if (SendTrackingData && State == SocketState.WORKING)
             {
-                // Always sample on the display tick; overwrite pending payload so a slow
-                // TCP send never blocks pose capture (drop-old / keep-latest).
-                _trackingData.Get(ref _trackingJsonData);
-                PublishLatestTracking(_trackingJsonData.ToJson());
+                // Sample on the display tick; skip ToJson/publish when content is unchanged
+                // (Hand joints themselves are refreshed at most 60 Hz inside TrackingData).
+                if (_trackingData.Get(ref _trackingJsonData))
+                {
+                    PublishLatestTracking(_trackingJsonData.ToJson());
+                }
             }
 
             if (State == SocketState.WORKING)
@@ -377,6 +379,14 @@ namespace Robot
             Connect(_address);
         }
 
+
+        /// <summary>
+        /// Forces the next tracking sample to publish even if poses match the last send.
+        /// </summary>
+        public void ResetTrackingPublishGate()
+        {
+            _trackingData.ResetPublishGate();
+        }
 
         private void PublishLatestTracking(string trackingJson)
         {

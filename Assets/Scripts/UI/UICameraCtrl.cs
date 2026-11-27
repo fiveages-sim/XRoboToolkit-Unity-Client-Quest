@@ -434,7 +434,8 @@ public partial class UICameraCtrl : MonoBehaviour
         {
             if (_writer != null)
             {
-                _trackingData.Get(ref _trackingJsonData);
+                // Full bundle every frame for the recording dump (no omit/60Hz gate).
+                _trackingData.Get(ref _trackingJsonData, omitUnchangedSources: false);
                 print(_trackingJsonData.ToString());
                 _writer.WriteLine(_trackingJsonData.ToJson());
             }
